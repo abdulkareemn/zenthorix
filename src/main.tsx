@@ -412,23 +412,29 @@ function StudentLogin({ go, setCurrentUser }: { go: (r: Route) => void; setCurre
 }
 
 function AdminLogin({ go, setCurrentUser }: { go: (r: Route) => void; setCurrentUser: React.Dispatch<React.SetStateAction<CurrentUser | null>> }) {
-  const [code, setCode] = useState('');
-  const [showCode, setShowCode] = useState(false);
+  const [email, setEmail] = useState('');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const verifyAdmin = async () => {
+    const normalizedEmail = email.trim().toLowerCase();
+    if (!normalizedEmail || !password) {
+      alert('Enter admin email and password.');
+      return;
+    }
     try {
       const response = await fetch('/api/auth/login', {
         method: 'POST',
         credentials: 'include',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ email: 'admin@example.com', password: code, role: 'admin' })
+        body: JSON.stringify({ email: normalizedEmail, password, role: 'admin' })
       });
+      const result = await response.json().catch(() => ({}));
 
       if (!response.ok) {
-        alert('Invalid admin access code');
+        alert(result.message || 'Invalid admin credentials');
         return;
       }
 
-      const result = await response.json().catch(() => ({}));
       if (result.user) setCurrentUser(result.user);
       go('/admin/dashboard');
     } catch (error) {
@@ -441,16 +447,17 @@ function AdminLogin({ go, setCurrentUser }: { go: (r: Route) => void; setCurrent
       <div className="auth-logo"><Monitor /></div>
       <h1>ProctorAI</h1>
       <p>Secure Online Assessment Platform</p>
-      <section className="auth-card compact">
+      <section className="auth-card">
         <span className="admin-dot"><Shield size={15} /></span>
         <h2>Admin Control</h2>
-        <p>Enter your secure verification code to continue.</p>
-        <label>Security Access Code</label>
+        <p>Sign in with your administrator credentials.</p>
+        <input value={email} onChange={(event) => setEmail(event.target.value)} placeholder="Admin email" />
         <label className="password-field">
-          <input value={code} onChange={(event) => setCode(event.target.value)} placeholder="Enter admin verification code" type={showCode ? 'text' : 'password'} />
-          <button type="button" onClick={() => setShowCode((current) => !current)}>{showCode ? 'Hide' : 'Show'}</button>
+          <input value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" type={showPassword ? 'text' : 'password'} />
+          <button type="button" onClick={() => setShowPassword((current) => !current)}>{showPassword ? 'Hide' : 'Show'}</button>
         </label>
-        <button className="primary full" onClick={verifyAdmin}>Verify Code</button>
+        <button className="primary full" onClick={verifyAdmin}>Login</button>
+        <div className="auth-divider" />
         <small>Admin Portal URL: {adminPortalUrl()}</small>
         <button className="link-btn" onClick={() => go('/login')}>Return to Student Login</button>
       </section>
@@ -1350,18 +1357,37 @@ async function registeredPhotoSignature(src: string): Promise<FaceSignature | nu
   return new Promise((resolve) => {
     const image = new Image();
     image.crossOrigin = 'anonymous';
-    image.onload = () => {
+    image.onload = async () => {
       const canvas = document.createElement('canvas');
-      canvas.width = Math.min(image.naturalWidth || 320, 320);
-      canvas.height = Math.min(image.naturalHeight || 240, 240);
+      const canvasWidth = Math.min(image.naturalWidth || 320, 320);
+      const canvasHeight = Math.min(image.naturalHeight || 240, 240);
+      canvas.width = canvasWidth;
+      canvas.height = canvasHeight;
       const context = canvas.getContext('2d', { willReadFrequently: true });
       if (!context) {
         resolve(null);
         return;
       }
-      context.drawImage(image, 0, 0, canvas.width, canvas.height);
-      const data = context.getImageData(0, 0, canvas.width, canvas.height);
-      resolve(colorSignatureFromFrame(data.data, canvas.width, canvas.height));
+      context.drawImage(image, 0, 0, canvasWidth, canvasHeight);
+      const data = context.getImageData(0, 0, canvasWidth, canvasHeight);
+
+      const FaceDetectorApi = (window as typeof window & { FaceDetector?: FaceDetectorConstructor }).FaceDetector;
+      const faceDetector = FaceDetectorApi ? new FaceDetectorApi({ fastMode: true, maxDetectedFaces: 1 }) : null;
+      let faceToUse: FaceBox | undefined = undefined;
+
+      try {
+        const detected = faceDetector ? await faceDetector.detect(canvas).catch(() => []) : [];
+        if (detected && detected.length > 0) {
+          faceToUse = detected[0].boundingBox;
+        } else {
+          const estimated = estimateFacesFromFrame(data.data, canvasWidth, canvasHeight);
+          if (estimated.length > 0) {
+            faceToUse = estimated[0];
+          }
+        }
+      } catch (err) {}
+
+      resolve(colorSignatureFromFrame(data.data, canvasWidth, canvasHeight, faceToUse));
     };
     image.onerror = () => resolve(null);
     image.src = src;
@@ -1375,6 +1401,7 @@ function ExamInterface({ go, exam, currentUser }: { go: (r: Route) => void; exam
   const [markedForReview, setMarkedForReview] = useState<Record<number, boolean>>({});
   const [events, setEvents] = useState<ProctorEvent[]>([]);
   const [mediaError, setMediaError] = useState('');
+  const [tabWarning, setTabWarning] = useState<string | null>(null);
   const [cameraStatus, setCameraStatus] = useState('Starting');
   const [mouthStatus, setMouthStatus] = useState('Clear');
   const [gazeStatus, setGazeStatus] = useState('Center');
@@ -1510,7 +1537,19 @@ function ExamInterface({ go, exam, currentUser }: { go: (r: Route) => void; exam
     }
   };
   const autoSubmitForViolation = (type: string, message: string) => {
-    addWarning(type, message, 'critical');
+    const finalEvent = makeProctorEvent(type, message, 'critical');
+    eventsRef.current = [finalEvent, ...eventsRef.current];
+    setEvents((current) => [finalEvent, ...current].slice(0, 50));
+
+    if (exam) {
+      fetch(`/api/exams/${getExamId(exam)}/events`, {
+        method: 'POST',
+        credentials: 'include',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(finalEvent)
+      }).catch(() => undefined);
+    }
+
     if (!autoSubmitRef.current) {
       autoSubmitRef.current = true;
       void submitExamRef.current();
@@ -1856,7 +1895,7 @@ function ExamInterface({ go, exam, currentUser }: { go: (r: Route) => void; exam
           autoSubmitRef.current = true;
           void submitExamRef.current();
         } else {
-          alert(`Warning ${tabSwitchCountRef.current}/3: ${message}`);
+          setTabWarning(`Warning ${tabSwitchCountRef.current}/3: ${message}`);
         }
       }
 
@@ -2009,23 +2048,128 @@ function ExamInterface({ go, exam, currentUser }: { go: (r: Route) => void; exam
           <button className="primary" disabled={submitting} onClick={() => void submitExam()}>{submitting ? 'Submitting...' : 'Submit'}</button>
         </div>
       </footer>
+      {tabWarning && (
+        <div className="modal-backdrop">
+          <div className="auth-card" style={{ maxWidth: '400px', textAlign: 'center', padding: '2rem' }}>
+            <div className="auth-logo" style={{ color: 'var(--accent-red)' }}>
+              <AlertTriangle size={32} />
+            </div>
+            <h3 style={{ margin: '1rem 0' }}>Exam Violation Warning</h3>
+            <p style={{ marginBottom: '1.5rem', fontSize: '0.95rem' }}>{tabWarning}</p>
+            <button className="primary full" onClick={() => setTabWarning(null)}>I Understand</button>
+          </div>
+        </div>
+      )}
     </main>
   );
 }
 function StudentResults({ go }: { go: (r: Route) => void }) {
-  const submittedAt = sessionStorage.getItem('lastSubmissionAt');
   const [results, setResults] = useState<Submission[]>([]);
+  const [selectedResult, setSelectedResult] = useState<Submission | null>(null);
 
   useEffect(() => {
     fetch('/api/exams/results', { credentials: 'include' })
       .then((response) => response.ok ? response.json() : null)
       .then((result) => {
-        if (Array.isArray(result?.results)) setResults(result.results);
+        if (Array.isArray(result?.results)) {
+          setResults(result.results);
+          if (result.results.length > 0) {
+            setSelectedResult(result.results[0]);
+          }
+        }
       })
       .catch(() => undefined);
   }, []);
 
-  return <section className="page"><button className="back" onClick={() => go('/student/dashboard')}><ArrowLeft size={15} /> Back to Dashboard</button><div className="result-layout"><section className="score-card empty-score"><Trophy size={56} /><h3>{results.length > 0 ? 'Result Published' : submittedAt ? 'Assessment Submitted' : 'No Result Available'}</h3><p>{results.length > 0 ? 'Your reviewed result is now available.' : submittedAt ? `Submitted for admin review on ${new Date(submittedAt).toLocaleString()}.` : 'Completed assessment results will appear here once they are published.'}</p></section><div><Card title="Published Results">{results.length === 0 ? <EmptyState icon={<BarChart3 size={28} />} title="Pending admin review" text="Scores and proctoring notes will appear after review." /> : <DataTable headers={['Exam', 'Language', 'Published', 'Note']} >{results.map((result) => <tr key={result._id}><td>{result.exam?.title || 'Assessment'}</td><td>{result.exam?.language || '-'}</td><td>{result.publishedAt ? new Date(result.publishedAt).toLocaleString() : '-'}</td><td>{result.resultNote || 'Published'}</td></tr>)}</DataTable>}</Card><Card title="Question-wise Result"><DataTable headers={['Q No.', 'Topic', 'Time Taken', 'Status']}><tr><td colSpan={4}><EmptyState icon={<FileText size={28} />} title={results.length > 0 ? 'Reviewed' : 'Submission saved'} text={results.length > 0 ? 'Detailed question review is available to admin.' : 'Question-level outcomes will appear after review.'} /></td></tr></DataTable></Card></div></div></section>;
+  const report = selectedResult ? reportForSubmission(selectedResult) : null;
+  const isPublished = selectedResult?.status === 'published';
+
+  return (
+    <section className="page">
+      <button className="back" onClick={() => go('/student/dashboard')}>
+        <ArrowLeft size={15} /> Back to Dashboard
+      </button>
+      <div className="result-layout">
+        <section className={`score-card ${!isPublished ? 'empty-score' : ''}`}>
+          <Trophy size={48} />
+          {selectedResult ? (
+            isPublished ? (
+              <div style={{ width: '100%' }}>
+                <h3>Result Published</h3>
+                <p className="muted" style={{ marginBottom: '1rem' }}>Your reviewed assessment details.</p>
+                <div className="report-grid" style={{ gridTemplateColumns: '1fr 1fr', gap: '0.75rem', marginBottom: '1rem' }}>
+                  <article style={{ background: 'rgba(255,255,255,0.05)', padding: '0.75rem', borderRadius: '6px' }}>
+                    <b>{report?.label}</b>
+                    <small>Overall Risk</small>
+                  </article>
+                  <article style={{ background: 'rgba(255,255,255,0.05)', padding: '0.75rem', borderRadius: '6px' }}>
+                    <b>{report?.score}%</b>
+                    <small>Risk Score</small>
+                  </article>
+                  <article style={{ background: 'rgba(255,255,255,0.05)', padding: '0.75rem', borderRadius: '6px' }}>
+                    <b>{report?.warnings}</b>
+                    <small>Warnings</small>
+                  </article>
+                  <article style={{ background: 'rgba(255,255,255,0.05)', padding: '0.75rem', borderRadius: '6px' }}>
+                    <b>{selectedResult.tabSwitchCount || 0}</b>
+                    <small>Tab Switches</small>
+                  </article>
+                </div>
+                <div style={{ textAlign: 'left', background: 'rgba(255,255,255,0.05)', padding: '1rem', borderRadius: '8px', borderLeft: '3px solid var(--accent-purple)' }}>
+                  <strong>Admin Note:</strong>
+                  <p style={{ marginTop: '0.25rem', fontSize: '0.9rem', color: '#e5e7eb' }}>{selectedResult.resultNote || 'Verified by admin.'}</p>
+                </div>
+              </div>
+            ) : (
+              <div>
+                <h3>Assessment Submitted</h3>
+                <p>Submitted for admin review on {selectedResult.submittedAt ? new Date(selectedResult.submittedAt).toLocaleString() : new Date().toLocaleString()}.</p>
+                <p className="muted" style={{ marginTop: '0.5rem', fontSize: '0.85rem' }}>Your results will appear here once the administrator approves your proctoring logs.</p>
+              </div>
+            )
+          ) : (
+            <div>
+              <h3>No Result Available</h3>
+              <p>Completed assessment results will appear here once they are published.</p>
+            </div>
+          )}
+        </section>
+
+        <div>
+          <Card title="Assessment Results">
+            {results.length === 0 ? (
+              <EmptyState icon={<BarChart3 size={28} />} title="No results yet" text="No submitted or reviewed exams found." />
+            ) : (
+              <DataTable headers={['Exam', 'Language', 'Submitted At', 'Status', 'Action']}>
+                {results.map((result) => (
+                  <tr key={result._id} className={selectedResult?._id === result._id ? 'active-row' : ''} style={{ cursor: 'pointer' }} onClick={() => setSelectedResult(result)}>
+                    <td><strong>{result.exam?.title || 'Assessment'}</strong></td>
+                    <td>{result.exam?.language || '-'}</td>
+                    <td>{result.submittedAt ? new Date(result.submittedAt).toLocaleString() : '-'}</td>
+                    <td><Status value={result.status === 'published' ? 'Published' : 'Under Review'} /></td>
+                    <td>
+                      <button className="link-btn" onClick={(e) => { e.stopPropagation(); setSelectedResult(result); }}>
+                        View details
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </DataTable>
+            )}
+          </Card>
+          <Card title="Question-wise Result">
+            <DataTable headers={['Q No.', 'Topic', 'Time Taken', 'Status']}>
+              <tr>
+                <td colSpan={4}>
+                  <EmptyState icon={<FileText size={28} />} title={isPublished ? 'Reviewed' : 'Submission saved'} text={isPublished ? 'Detailed question outcomes verified by admin.' : 'Question-level outcomes will appear after review.'} />
+                </td>
+              </tr>
+            </DataTable>
+          </Card>
+        </div>
+      </div>
+    </section>
+  );
 }
 
 function Progress({ label, value, max }: { label: string; value: number; max: number }) {

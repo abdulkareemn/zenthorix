@@ -81,9 +81,9 @@ async function listPublishedResults(req, res) {
       return res.status(403).json({ message: 'Unauthorized' });
     }
 
-    const results = await Submission.find({ student: req.user._id, status: 'published' })
-      .populate('exam', 'title language')
-      .sort({ publishedAt: -1 });
+    const results = await Submission.find({ student: req.user._id, status: { $ne: 'in-progress' } })
+      .populate('exam', 'title language duration questions')
+      .sort({ publishedAt: -1, submittedAt: -1 });
 
     return res.status(200).json({ results });
   } catch (error) {
@@ -274,16 +274,28 @@ async function submitExam(req, res) {
       submittedAt: new Date()
     };
 
+    let finalEvents = normalizeProctorEvents(req.body.proctorEvents);
+    if (existingSubmission) {
+      const existingEvents = existingSubmission.proctorEvents || [];
+      const combined = [...existingEvents];
+      for (const event of finalEvents) {
+        const isDup = combined.some(e => e.type === event.type && e.message === event.message && Math.abs(new Date(e.createdAt) - new Date(event.createdAt)) < 1500);
+        if (!isDup) {
+          combined.push(event);
+        }
+      }
+      finalEvents = combined;
+    }
+
     const submission = existingSubmission
       ? await Submission.findByIdAndUpdate(
         existingSubmission._id,
         {
-          $set: update,
-          $push: { proctorEvents: { $each: normalizeProctorEvents(req.body.proctorEvents) } }
+          $set: { ...update, proctorEvents: finalEvents }
         },
         { new: true }
       )
-      : await Submission.create({ ...update, proctorEvents: normalizeProctorEvents(req.body.proctorEvents) });
+      : await Submission.create({ ...update, proctorEvents: finalEvents });
 
     return res.status(201).json({ submission });
   } catch (error) {
