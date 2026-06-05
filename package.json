@@ -2,6 +2,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1",
     "server": "node server/server.js",
+    "dev:all": "concurrently --kill-others-on-fail --names \"API,WEB\" --prefix-colors \"cyan,magenta\" \"node server/server.js\" \"vite --host 127.0.0.1\"",
     "start": "npm run build && npm run server",
     "seed:admin": "node server/scripts/createAdmin.js",
     "build": "tsc && vite build",
@@ -15,16 +16,16 @@
     "dotenv": "latest",
     "express": "latest",
     "jsonwebtoken": "latest",
+    "lucide-react": "latest",
     "mongoose": "latest",
-    "vite": "latest",
-    "typescript": "latest",
     "react": "latest",
     "react-dom": "latest",
-    "lucide-react": "latest"
+    "typescript": "latest",
+    "vite": "latest"
   },
   "devDependencies": {
     "@types/react": "latest",
-    "@types/react-dom": "latest"
+    "@types/react-dom": "latest",
+    "concurrently": "^10.0.3"
   }
 }
- 
