@@ -13,9 +13,17 @@ const codeRunnerRoutes = require('./routes/codeRunnerRoutes');
 const examRoutes = require('./routes/examRoutes');
 
 const app = express();
+app.set('trust proxy', 1); // required so req.secure works behind Vercel / reverse proxy
 const port = process.env.PORT || 5000;
-const clientOrigin = process.env.CLIENT_ORIGIN || 'http://127.0.0.1:5173';
-const allowedOrigins = new Set([clientOrigin, 'http://localhost:4173', 'http://127.0.0.1:4173']);
+
+// CLIENT_ORIGIN can be a comma-separated list, e.g.
+//   http://127.0.0.1:5173,https://zenthorix.vercel.app
+const rawOrigins = process.env.CLIENT_ORIGIN || 'http://127.0.0.1:5173';
+const allowedOrigins = new Set([
+  ...rawOrigins.split(',').map(o => o.trim()),
+  'http://localhost:4173',
+  'http://127.0.0.1:4173'
+]);
 
 const User = require('./models/User');
 
@@ -53,7 +61,13 @@ connectDB().then(autoSeedAdmin);
 
 app.use(cors({
   origin(origin, callback) {
-    if (!origin || allowedOrigins.has(origin)) return callback(null, true);
+    // Allow requests with no origin (e.g. server-to-server, Postman)
+    if (!origin) return callback(null, true);
+    if (allowedOrigins.has(origin)) return callback(null, true);
+    // In production, also allow any *.vercel.app origin for preview deployments
+    if (process.env.NODE_ENV === 'production' && origin.endsWith('.vercel.app')) {
+      return callback(null, true);
+    }
     return callback(null, false);
   },
   credentials: true
